@@ -165,9 +165,12 @@ jobs:
             '{changelog:$cl, changelogType:"markdown", gameVersions:$gv, releaseType:$rt}')"
 
           echo "Uploading $ZIP to CurseForge project $CF_PROJECT_ID (releaseType=$RELTYPE)..."
+          # metadata goes via --form-string (NOT -F): the JSON can contain ';', '@', '<'
+          # (e.g. a ';' in the changelog), which -F would misread as field parameters and
+          # corrupt the JSON. The file field keeps -F so '@' means "upload this file".
           HTTP="$(curl -sS -o /tmp/cf_resp.json -w '%{http_code}' -X POST \
                     -H "X-Api-Token: $CF_API_TOKEN" \
-                    -F "metadata=$META" \
+                    --form-string "metadata=$META" \
                     -F "file=@${ZIP}" \
                     "https://wow.curseforge.com/api/projects/${CF_PROJECT_ID}/upload-file")"
           echo "HTTP $HTTP"; cat /tmp/cf_resp.json; echo
