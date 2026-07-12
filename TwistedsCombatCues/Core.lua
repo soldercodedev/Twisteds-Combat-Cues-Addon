@@ -1,7 +1,7 @@
 -- Twisteds Combat Cues (TCC)
 -- Rule-based audible/visual cue engine.
 -- A rule = a nested tree of conditions (AND/OR groups) + an action (sound/visual/chat).
--- Author: Twistedfury-Zul'jin  |  Version: 1.2.0
+-- Author: Twistedfury-Zul'jin  |  Version: 1.2.0-beta.2
 local addonName, TCC = ...
 
 local PREFIX = "|cff33ff99Twisteds Combat Cues:|r "
@@ -13,6 +13,49 @@ local function metadata(field)
     if GetAddOnMetadata then return GetAddOnMetadata(addonName, field) end
 end
 TCC.VERSION = metadata("Version") or "1.0.0"
+
+-- Midnight (12.0) "secret values": some combat/unit/measurement APIs (UnitInRange,
+-- IsSpellInRange, threat, GetVerticalScrollRange when the scroll content shows secrets,
+-- ...) return values that tainted (addon) code may STORE and PASS but may not COMPARE or
+-- do arithmetic on -- doing so throws "attempt to compare ... a secret value". Blizzard
+-- ships canaccessvalue()/issecretvalue() to test first (calling them on a secret is
+-- allowed). These globals don't exist pre-12.0, where every value is readable.
+-- TCC.CanRead(v) -> true when it is safe to compare / do math on v right now.
+local _canaccessvalue, _issecretvalue = canaccessvalue, issecretvalue
+function TCC.CanRead(v)
+    -- Prefer issecretvalue: our gate is precisely "is v secret?". canaccessvalue asks a
+    -- stricter "do I have permission to operate on it", which can read false for plain
+    -- nil / edge cases that are not actually secret, causing false "protected".
+    if _issecretvalue then
+        local ok, res = pcall(_issecretvalue, v)
+        if ok then return not res end
+    end
+    if _canaccessvalue then
+        local ok, res = pcall(_canaccessvalue, v)
+        if ok then return res and true or false end
+    end
+    return true   -- pre-12.0 client (or guards unavailable): nothing is secret
+end
+
+-- UnitDistanceSquared is CENTER-to-center; the game's operational/spell ranges are
+-- EDGE-to-edge (each unit's ~1.5yd combat reach is subtracted). Pad range thresholds by
+-- both reaches (~3yd) so our "40yd" matches what UnitInRange / a 40yd spell actually
+-- reach -- a unit at ~43yd center distance is in true 40yd range. Empirically 2.75yd
+-- matches the game's operational range best (measured in-game against the real flip point).
+TCC.RANGE_REACH_PAD = 2.75
+
+-- Distance to a unit in yards, or nil if it can't be determined right now.
+-- UnitDistanceSquared stays READABLE in most instanced content where UnitInRange goes
+-- secret, and gives an exact distance -- so range checks keep working (and get better).
+function TCC.UnitDistanceYards(unit)
+    if UnitDistanceSquared then
+        local d2 = UnitDistanceSquared(unit)
+        if TCC.CanRead(d2) and type(d2) == "number" and d2 >= 0 then
+            return math.sqrt(d2)
+        end
+    end
+    return nil
+end
 
 -- Fonts for a rule's visual text: WoW built-ins + bundled TTFs in assets/fonts.
 local FDIR = "Interface\\AddOns\\TwistedsCombatCues\\assets\\fonts\\"
@@ -68,7 +111,7 @@ local DEFAULTS = {
         paletteShown    = false,           -- on-screen marker palette
         paletteLocked   = false,
         palettePos      = nil,
-        focusMsg        = "Focus {rt}: %t",         -- %t/%target = focus name, {rt} = marker icon
+        focusMsg        = "Focus {rt}",             -- {rt} = marker icon (target-name tokens no longer supported)
         readyMsg        = "My interrupt target is {rt}",  -- no target exists at a ready check
     },
 }
@@ -1042,6 +1085,11 @@ local function HandleSlash(msg)
         if TCC.OpenManager then TCC.OpenManager("debug") end
     elseif msg == "macros" or msg == "macro" then
         if TCC.OpenManager then TCC.OpenManager("macros") end
+    elseif msg == "togglemarkers" or msg == "markers" then
+        if TCC.ToggleMarkerPalette then
+            local shown = TCC.ToggleMarkerPalette()
+            print(PREFIX .. "On-screen marker palette " .. (shown and "shown." or "hidden."))
+        end
     elseif msg == "reset" then
         pendingReset = true
         print(PREFIX .. "This resets ALL settings and alerts. Type |cffffff00/tcc reset confirm|r to proceed.")
@@ -1062,6 +1110,7 @@ local function HandleSlash(msg)
         print("  |cffffff00/tcc status|r - list alerts and state")
         print("  |cffffff00/tcc debug|r - live diagnostics (what the engine sees)")
         print("  |cffffff00/tcc macros|r - macro factory (focus / interrupt)")
+        print("  |cffffff00/tcc togglemarkers|r - show/hide the on-screen marker palette")
         print("  |cffffff00/tcc reset|r - reset everything (confirmation required)")
     end
 end

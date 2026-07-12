@@ -119,10 +119,24 @@ local function stylePanel(f, fill, edge)
     g:SetPoint("TOPLEFT", 1, -1); g:SetPoint("BOTTOMRIGHT", -1, 1); paint(g, fill); f._fill = g
 end
 
+-- Readable vertical scroll max for a ScrollFrame. GetVerticalScrollRange() can return a
+-- Midnight "secret" number when the scroll content has held secret values -- comparing or
+-- doing math on it then throws. The child/viewport heights stay readable, so derive it.
+local function scrollMax(sf)
+    local child = sf.GetScrollChild and sf:GetScrollChild()
+    local ch = child and child:GetHeight()
+    local vh = sf:GetHeight()
+    if child and TCC.CanRead(ch) and TCC.CanRead(vh) then
+        return math.max(0, ch - vh)
+    end
+    return 0
+end
+
 -- Shared mousewheel scroller.
 local function scrollWheel(self, delta)
-    local cur, maxs = self:GetVerticalScroll(), self:GetVerticalScrollRange()
-    self:SetVerticalScroll(math.min(maxs, math.max(0, cur - delta * 30)))
+    local cur = self:GetVerticalScroll()
+    if not TCC.CanRead(cur) then return end   -- position unreadable (secret) -> can't clamp safely
+    self:SetVerticalScroll(math.min(scrollMax(self), math.max(0, cur - delta * 30)))
 end
 
 ----------------------------------------------------------------------
@@ -786,6 +800,17 @@ local function ShowExportDialog(str)
     d.title:SetText("Export - copy this string (Ctrl+C)")
     d.eb:SetText(str or ""); d.eb:SetCursorPosition(0); d.eb:HighlightText()
     d.info:SetText("Select all is done for you - press Ctrl+C.")
+    d.accept:Hide()
+    d:Show(); d.eb:SetFocus()
+end
+
+-- Show a URL in the copy dialog (WoW addons can't open a browser, so we let the user
+-- copy it out with Ctrl+C).
+local function ShowLinkDialog(title, url)
+    local d = ensureTextDialog()
+    d.title:SetText(title or "Copy this link (Ctrl+C)")
+    d.eb:SetText(url or ""); d.eb:SetCursorPosition(0); d.eb:HighlightText()
+    d.info:SetText("Selected for you - press Ctrl+C, then paste it into your browser.")
     d.accept:Hide()
     d:Show(); d.eb:SetFocus()
 end
@@ -1800,6 +1825,50 @@ local function buildCredits()
     content:SetHeight(math.max(WIN_H, -y + 20))
 end
 
+-- "What's New": renders the bundled CHANGELOG.md (embedded as TCC.CHANGELOG in the
+-- generated Changelog.lua) with a light Markdown pass -- "## x" = version header,
+-- "- ..." = bullet, **bold** = white.
+local function buildWhatsNew()
+    local x, y = PAD, -20
+    CLabel("What's New", x, y, C.accent, 16); y = y - 24
+    CLabel("Version " .. (TCC.VERSION or "1.0.0"), x, y, C.subtext, 12); y = y - 28
+
+    local text = TCC.CHANGELOG
+    if not text or text == "" then
+        CLabel("No changelog bundled with this build.", x, y, C.subtext, 12)
+        content:SetHeight(math.max(WIN_H, -y + 20)); return
+    end
+
+    local BULLET = "\226\128\162"   -- UTF-8 for the bullet glyph
+    local function flushBullet(buf)
+        if buf and buf ~= "" then
+            buf = buf:gsub("%*%*(.-)%*%*", "|cffffffff%1|r")
+            local _, h = CWrap("|cff8f98a6" .. BULLET .. "|r  " .. buf, x + 8, y, CONTENT_W - 64, C.subtext, 12)
+            y = y - (h + 7)
+        end
+    end
+
+    local cur
+    for line in (text .. "\n"):gmatch("(.-)\n") do
+        local ver     = line:match("^##%s+(.+)")
+        local bullet  = line:match("^%-%s+(.+)")
+        local cont    = line:match("^%s+(%S.*)")
+        if ver then
+            flushBullet(cur); cur = nil
+            y = y - 8; CSection(ver, x, y); y = y - 28
+        elseif bullet then
+            flushBullet(cur); cur = bullet
+        elseif cont and cur then
+            cur = cur .. " " .. cont          -- continuation of a wrapped bullet
+        elseif line == "" or line:match("^%s*$") then
+            flushBullet(cur); cur = nil
+        end
+    end
+    flushBullet(cur)
+
+    content:SetHeight(math.max(WIN_H, -y + 20))
+end
+
 ----------------------------------------------------------------------
 -- Content: live debug / diagnostics (/tcc debug)
 ----------------------------------------------------------------------
@@ -1876,22 +1945,64 @@ local function buildDebug()
         return (UnitName("pet") or "pet") .. (dead and "  (DEAD)" or "  (alive)"),
             dead and { 0.98, 0.5, 0.5 } or GREEN
     end)
-    addRow("Healer in range", function()
+    -- "Is a group member of this role within ~40yd" readout. Prefers exact distance
+    -- (UnitDistanceSquared -- readable in scenarios/instances where UnitInRange is
+    -- secret) and falls back to a guarded UnitInRange when no distance is available.
+    local function roleRangeRow(role, noun)
         if not (IsInGroup and IsInGroup()) then return "not in a group", DIM end
         local raid = IsInRaid and IsInRaid()
-        local found, inrange = false, false
+        local found, inrange, protected, nearest = false, false, false, nil
         for i = 1, (raid and 40 or 4) do
             local u = (raid and "raid" or "party") .. i
             if UnitExists(u) and not (UnitIsUnit and UnitIsUnit(u, "player")) then
-                if not UnitGroupRolesAssigned or UnitGroupRolesAssigned(u) == "HEALER" then
+                if not UnitGroupRolesAssigned or UnitGroupRolesAssigned(u) == role then
                     found = true
-                    local ir, ch = UnitInRange(u)
-                    if ch ~= false and ir then inrange = true end
+                    local yd = TCC.UnitDistanceYards(u)
+                    if yd then
+                        if not nearest or yd < nearest then nearest = yd end
+                        if yd <= 40 + TCC.RANGE_REACH_PAD then inrange = true end
+                    else
+                        local ir, ch = UnitInRange(u)
+                        if TCC.CanRead(ir) and TCC.CanRead(ch) then
+                            if ch ~= false and ir then inrange = true end
+                        else
+                            protected = true        -- range is secret here (restricted content)
+                        end
+                    end
                 end
             end
         end
-        if not found then return "no healer found (roles unassigned?)", AMBER end
-        return inrange and "in range" or "OUT OF RANGE", inrange and GREEN or { 0.98, 0.5, 0.5 }
+        if not found then return "no " .. noun .. " found (roles unassigned?)", AMBER end
+        local dist = nearest and string.format("  (nearest ~%.0fyd)", nearest) or ""
+        if inrange then return "in range" .. dist, GREEN end
+        if nearest then return "OUT OF RANGE" .. dist, { 0.98, 0.5, 0.5 } end
+        if protected then return "range hidden (protected here)", AMBER end
+        return "OUT OF RANGE", { 0.98, 0.5, 0.5 }
+    end
+    addRow("Healer in range", function() return roleRangeRow("HEALER", "healer") end)
+    addRow("Tank in range",   function() return roleRangeRow("TANK", "tank") end)
+    addRow("  range guard (raw)", function()   -- TEMP DIAGNOSTIC: remove before release
+        if not (IsInGroup and IsInGroup()) then return "not in a group", DIM end
+        if not issecretvalue then return "no guard fns on this client", AMBER end
+        local function d(v)                     -- mark secrets; never compare one
+            if issecretvalue(v) then return "|cffff8800SECRET|r" end
+            return tostring(v)
+        end
+        local raid = IsInRaid and IsInRaid()
+        local u
+        for i = 1, (raid and 40 or 4) do
+            local uu = (raid and "raid" or "party") .. i
+            if UnitExists(uu) and not (UnitIsUnit and UnitIsUnit(uu, "player")) then u = uu; break end
+        end
+        if not u then return "no other member", DIM end
+        local _, inst = IsInInstance()
+        local parts = {
+            u, "inst=" .. tostring(inst),
+            "InRange=" .. d((UnitInRange(u))),
+            "Vis=" .. d(UnitIsVisible and UnitIsVisible(u)),
+            "DistSq=" .. d(UnitDistanceSquared and UnitDistanceSquared(u)),
+        }
+        return table.concat(parts, "  "), DIM
     end)
     addRow("Instance type", function()
         local inI, t = IsInInstance()
@@ -2016,6 +2127,7 @@ local function buildDebug()
             return nil
         end)
         if not ok then return "protected/err: " .. stripErr(res), AMBER end
+        if not TCC.CanRead(res) then return "hidden (protected here)", AMBER end
         if res == nil then return "n/a (item has no range check)", DIM end
         return res and "IN RANGE" or "out of range", res and GREEN or { 0.98, 0.5, 0.5 }
     end)
@@ -2106,7 +2218,9 @@ local function ensureMarkerPalette()
         if TCC.db.macro then TCC.db.macro.palettePos = { pt, xo, yo } end
     end)
     stylePanel(p, C.panel, C.border)
-    tinsert(UISpecialFrames, "TwistedsCombatCuesMarkerPalette")
+    -- Deliberately NOT in UISpecialFrames: the palette is only toggled via the Focus
+    -- Tools checkbox or /tcc togglemarkers, so Escape / stray clicks can't close it and
+    -- its shown state always matches the saved setting (which restores cleanly on reload).
     p.btns = {}
     for i = 1, 8 do
         local b = CreateFrame("Button", "TwistedsCombatCuesPaletteBtn" .. i, p, "SecureActionButtonTemplate")
@@ -2148,6 +2262,17 @@ function TCC.SetMarkerPaletteShown(show)
     p:Show()
 end
 
+-- Flip the marker palette on/off, persist it, and keep the Focus Tools checkbox in sync.
+-- The single entry point for the UI toggle and /tcc togglemarkers. Returns the new state.
+function TCC.ToggleMarkerPalette()
+    if not (TCC.db and TCC.db.macro) then return end
+    local v = not TCC.db.macro.paletteShown
+    TCC.db.macro.paletteShown = v
+    TCC.SetMarkerPaletteShown(v)
+    if TCC.RefreshManager then TCC.RefreshManager() end
+    return v
+end
+
 local function macroBox(text, x, y)
     local _, h = CWrap(text, x + 8, y - 6, CONTENT_W - 64, C.text, 11)
     CBox(x, y + 2, CONTENT_W - 26, h + 14, 0.07, 0, C.accent)
@@ -2160,7 +2285,7 @@ local function buildMacros()
     d.macro = d.macro or {}
     d.macro.mark = tonumber(d.macro.mark) or 8
     d.macro.channel = d.macro.channel or "NONE"
-    if d.macro.focusMsg == nil then d.macro.focusMsg = "Focus {rt}: %t" end
+    if d.macro.focusMsg == nil then d.macro.focusMsg = "Focus {rt}" end
     if d.macro.readyMsg == nil then d.macro.readyMsg = "My interrupt target is {rt}" end
     d.macro.announceInstance = d.macro.announceInstance or "any"
 
@@ -2243,7 +2368,7 @@ local function buildMacros()
     CLabel("When I set focus", x + 46, y - 2, txtCol)
     y = y - 26
     setTip(CEdit(x + 46, y, CONTENT_W - 116, d.macro.focusMsg or "", function(t) d.macro.focusMsg = t end),
-        "Focus message", "Sent when you set focus.  %t / %target = the target's name,  {rt} = your marker icon.")
+        "Focus message", "Sent when you set focus.  {rt} = your marker icon.")
     y = y - 34
 
     setTip(CToggle(x, y, d.macro.announceReady, function(v) d.macro.announceReady = v; TCC.RefreshManager() end),
@@ -2253,7 +2378,7 @@ local function buildMacros()
     setTip(CEdit(x + 46, y, CONTENT_W - 116, d.macro.readyMsg or "", function(t) d.macro.readyMsg = t end),
         "Ready-check message", "Sent when a ready check starts. There's usually no target then, so lead with |cffffffff{rt}|r (your marker).")
     y = y - 30
-    local _, hh = CWrap("Wildcards: |cffffffff%t|r / |cffffffff%target|r = your focus's name  ·  |cffffffff{rt}|r = the marker icon.",
+    local _, hh = CWrap("Wildcard: |cffffffff{rt}|r = the marker icon.",
         x + 46, y, CONTENT_W - 110, C.subtext, 11)
     y = y - (hh + 6)
     if not canAnnounce then
@@ -2449,6 +2574,7 @@ local HELP_COMMANDS = {
     { "/tcc",              "Open or close this window." },
     { "/tcc alerts",       "Jump straight to the Alerts list." },
     { "/tcc macros",       "Open Focus Tools (focus / interrupt / stun)." },
+    { "/tcc togglemarkers", "Show / hide the on-screen marker palette." },
     { "/tcc debug",        "Open Live Diagnostics - what the engine sees." },
     { "/tcc options",      "Open the Blizzard interface options panel." },
     { "/tcc on   /   off", "Enable or disable all cues." },
@@ -2512,6 +2638,8 @@ local function buildContent()
             buildGlobal()
         elseif TCC.uiView == "credits" then
             buildCredits()
+        elseif TCC.uiView == "whatsnew" then
+            buildWhatsNew()
         elseif TCC.uiView == "debug" then
             buildDebug()
         elseif TCC.uiView == "macros" then
@@ -2634,6 +2762,7 @@ local function EnsureManager()
         { view = "macros",  label = "Focus Tools",      icon = ICON_DIR .. "crosshair.tga" },
         { view = "debug",   label = "Live Diagnostics", icon = ICON_DIR .. "activity.tga" },
         { view = "help",    label = "Help & Commands",  icon = ICON_DIR .. "help.tga" },
+        { view = "whatsnew", label = "What's New",       icon = ICON_DIR .. "star.tga" },
         { view = "credits", label = "About & Thanks",   icon = ICON_DIR .. "info-circle.tga" },
     }
     mgr.toolRows = {}
@@ -2684,14 +2813,21 @@ local function EnsureManager()
     mgr.sbar, mgr.sthumb, mgr.sthumbTex = sbar, sthumb, sthumbTex
 
     updateScrollbar = function()
-        local range = contentScroll:GetVerticalScrollRange() or 0
         local vh, ch = contentScroll:GetHeight(), content:GetHeight()
+        -- Midnight: GetVerticalScrollRange()/GetVerticalScroll() come back "secret" when
+        -- the scroll content shows secret values (e.g. the diagnostics page), and
+        -- comparing a secret throws. The heights are plain numbers, so derive the
+        -- scrollable range from them and only read the live scroll offset if it's safe.
+        if not (TCC.CanRead(vh) and TCC.CanRead(ch)) then sbar:Hide(); return end
+        local range = math.max(0, (ch or 0) - (vh or 0))
         if range > 1 and ch > 0 then
             sbar:Show()
             local trackH = sbar:GetHeight()
             local thumbH = math.max(24, trackH * (vh / ch))
             sthumb:SetHeight(thumbH)
-            local frac = contentScroll:GetVerticalScroll() / range
+            local pos = contentScroll:GetVerticalScroll()
+            local frac = TCC.CanRead(pos) and (pos / range) or 0
+            if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
             sthumb:ClearAllPoints(); sthumb:SetPoint("TOP", sbar, "TOP", 0, -frac * (trackH - thumbH))
             paint(sthumbTex, C.accent)
         else
@@ -2713,6 +2849,24 @@ local function EnsureManager()
     local fver = footer:CreateFontString(nil, "OVERLAY"); fver:SetFont(FONT, 11)
     fver:SetPoint("RIGHT", -14, 0); fver:SetTextColor(unpack(C.accent))
     fver:SetText("v" .. (TCC.VERSION or "1.0.0"))
+
+    -- Community: Discord invite. WoW can't open a browser, so a click pops the link in a
+    -- copy dialog (Ctrl+C).
+    local disc = CreateFrame("Button", nil, footer)
+    disc.fs = disc:CreateFontString(nil, "OVERLAY"); disc.fs:SetFont(FONT, 11)
+    disc.fs:SetPoint("CENTER"); disc.fs:SetText("Discord"); disc.fs:SetTextColor(unpack(C.accent))
+    disc:SetSize(disc.fs:GetStringWidth() + 12, FOOTER_H)
+    disc:SetPoint("CENTER", footer, "CENTER", 0, 0)
+    disc:SetScript("OnEnter", function(self)
+        self.fs:SetTextColor(1, 1, 1)
+        GameTooltip:SetOwner(self, "ANCHOR_TOP")
+        GameTooltip:SetText("Join the Discord", accentHeader())
+        GameTooltip:AddLine("Click to copy the invite link.", 0.82, 0.86, 0.92, true); GameTooltip:Show()
+    end)
+    disc:SetScript("OnLeave", function(self) self.fs:SetTextColor(unpack(C.accent)); GameTooltip_Hide() end)
+    disc:SetScript("OnClick", function()
+        ShowLinkDialog("Discord invite - copy this link (Ctrl+C)", "https://discord.com/invite/pN5vYDrQ5j")
+    end)
     mgr.footer = footer
 
     -- Keep the Focus Tools keybind readout in sync: SetBinding doesn't reflect in
@@ -2729,7 +2883,7 @@ local function EnsureManager()
     sthumb:RegisterForDrag("LeftButton")
     sthumb:SetScript("OnDragStart", function(self)
         self:SetScript("OnUpdate", function()
-            local range = contentScroll:GetVerticalScrollRange() or 0
+            local range = scrollMax(contentScroll)   -- heights-based; safe vs secret scroll range
             if range <= 0 then return end
             local trackH = sbar:GetHeight()
             local s = sbar:GetEffectiveScale()

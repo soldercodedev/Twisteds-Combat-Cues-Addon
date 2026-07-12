@@ -209,20 +209,33 @@ end
 -- combat, so it's a no-op in combat (you still marked the target via the keybind).
 ----------------------------------------------------------------------
 
--- Fill %t/%target (focus name) and {rt} (marker icon tag) in an announce line.
+-- Fill the {rt} marker-icon tag in an announce line.
+-- Target-name parsing was removed on purpose: UnitName on the focus is a "secret" value
+-- in combat/instances (Midnight), so we no longer read it at all.
 local function fmtAnnounce(msg, mark)
-    local name = (UnitExists and UnitExists("focus") and UnitName and UnitName("focus")) or "target"
     msg = tostring(msg or "")
-    msg = msg:gsub("%%target", name):gsub("%%t", name)
+    msg = msg:gsub("%%target", ""):gsub("%%t", "")   -- drop legacy name tokens, don't leak them
     local rt = (mark and mark >= 1 and mark <= 8) and ("{rt" .. mark .. "}") or ""
     msg = msg:gsub("{rt}", rt)
+    -- Tidy any gap left by a removed token (double spaces, a dangling ": " / " -").
+    msg = msg:gsub("%s+", " "):gsub("%s*[:%-]%s*$", ""):gsub("^%s+", ""):gsub("%s+$", "")
     return msg
 end
 
 local function sendAnnounce(msg, m)
     if not (SendChatMessage and m.channel and m.channel ~= "NONE") then return end
     local text = fmtAnnounce(msg, tonumber(m.mark) or 0)
-    if text ~= "" then pcall(SendChatMessage, text, m.channel) end
+    if text == "" then return end
+    local ch = m.channel
+    -- In combat the focus is set by a SECURE action; this handler runs inside that
+    -- protected call stack, where SendChatMessage (a restricted API) is blocked. Defer to
+    -- a fresh frame so it sends as ordinary insecure code (how other addons announce in
+    -- combat). Out of combat this is just a harmless 1-frame delay.
+    if C_Timer and C_Timer.After then
+        C_Timer.After(0, function() pcall(SendChatMessage, text, ch) end)
+    else
+        pcall(SendChatMessage, text, ch)
+    end
 end
 
 -- Is the announce allowed in the current content? (instance-type gate, e.g. M+ but not raids)

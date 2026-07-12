@@ -432,18 +432,32 @@ EVAL.groupRange = function(c)
     end
     if n == 0 then return false end
 
-    local anyMatch, anyInRange = false, false
+    local maxYards = tonumber(c.yards) or 40           -- ~UnitInRange operational range
+    local anyMatch, anyInRange, restricted = false, false, false
     for i = 1, n do
         local u = units[i]
         local matches = (role == "any")
             or (UnitGroupRolesAssigned and UnitGroupRolesAssigned(u) == role)
         if matches and (not UnitIsDeadOrGhost or not UnitIsDeadOrGhost(u)) then
             anyMatch = true
-            local inR, checked = UnitInRange(u)
-            if checked ~= false and inR then anyInRange = true end
+            local yd = TCC.UnitDistanceYards(u)
+            if yd then
+                if yd <= maxYards + TCC.RANGE_REACH_PAD then anyInRange = true end
+            else
+                -- No readable distance -> fall back to UnitInRange (guarded for secrets).
+                local inR, checked = UnitInRange(u)
+                if TCC.CanRead(inR) and TCC.CanRead(checked) then
+                    if checked ~= false and inR then anyInRange = true end
+                else
+                    restricted = true                -- secret here (identity-restricted unit)
+                end
+            end
         end
     end
     if not anyMatch then return false end          -- no living member of that role
+    -- If range was secret for everyone we could check and none read as in-range, we
+    -- genuinely can't tell -- don't fire either "in" or "out" on a guess.
+    if restricted and not anyInRange then return false end
     if op == "in" then return anyInRange end
     return not anyInRange                            -- out: no one of that role in range
 end
@@ -460,7 +474,9 @@ end
 EVAL.threat = function(c)
     if not UnitExists("target") then return false end
     if not UnitThreatSituation then return false end
-    local sit = UnitThreatSituation("player", "target") or 0
+    local sit = UnitThreatSituation("player", "target")
+    if not TCC.CanRead(sit) then return false end  -- threat can be secret -> don't fire on a guess
+    sit = sit or 0
     local s = c.state or "aggro"
     if s == "aggro" then return sit >= 2 end       -- you're tanking it (pulled aggro)
     if s == "high" then return sit >= 1 end        -- high threat, about to pull
@@ -479,6 +495,7 @@ EVAL.range = function(c)
     key = key or c.spell
     if not (C_Spell and C_Spell.IsSpellInRange) then return false end
     local r = C_Spell.IsSpellInRange(key, "target")
+    if not TCC.CanRead(r) then return false end    -- secret here -> can't decide, don't fire
     if r == nil then return false end              -- spell has no range check
     local inRange = (r == true or r == 1)
     if c.op == "in" then return inRange end

@@ -2,7 +2,7 @@
 ## Title: |cff33ff99Twisteds Combat Cues|r Data
 ## Notes: Load-on-demand spell/item databases for Twisteds Combat Cues.
 ## Author: Twistedfury-Zul'jin
-## Version: 1.2.0-beta.1
+## Version: 1.2.0-beta.2
 ## Group: TwistedsCombatCues
 ## Category: Twisteds Combat Cues
 ## Dependencies: TwistedsCombatCues
