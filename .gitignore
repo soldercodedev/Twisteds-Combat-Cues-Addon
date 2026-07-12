@@ -1,0 +1,19 @@
+# Build artifacts
+*.zip
+.release-staging/
+
+# Dev tooling should never live in this addon repo, but be safe
+__pycache__/
+*.py[cod]
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
+*.bak
+*.tmp
+*.log
+*.orig
+
+# WoW user data must never be committed
+*SavedVariables*
+WTF/

@@ -1,0 +1,14 @@
+## Interface: 120007
+## Title: |cff33ff99Twisteds Combat Cues|r Data
+## Notes: Load-on-demand spell/item databases for Twisteds Combat Cues.
+## Author: Twistedfury-Zul'jin
+## Version: 1.2.0-beta.1
+## Group: TwistedsCombatCues
+## Category: Twisteds Combat Cues
+## Dependencies: TwistedsCombatCues
+## LoadOnDemand: 1
+## IconTexture: Interface\AddOns\TwistedsCombatCues\assets\TCC_Logo.tga
+## X-Curse-Project-Name: TwistedsCombatCues
+
+SpellDB.lua
+ItemDB.lua

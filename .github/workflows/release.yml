@@ -1,0 +1,104 @@
+name: Package and release
+
+# Automatic packaging for Twisteds Combat Cues, driven from your own GitHub account.
+#
+# Push a version tag (e.g. `v1.2.0-beta.1`) and this workflow:
+#   1. reads the version from the tag,
+#   2. stamps it into both TOCs,
+#   3. builds a CurseForge-ready ZIP from the `addon/` folder (the two addon folders
+#      end up at the ZIP root - no wrapper, no dev/Python files),
+#   4. publishes a GitHub Release with the ZIP attached (pre-release for alpha/beta).
+#
+# CurseForge is handled by CurseForge's own GitHub integration (which imports the ZIP
+# attached to each GitHub Release). No CurseForge API token is stored here.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g. 1.2.0-beta.1)"
+        required: true
+
+permissions:
+  contents: write   # create the GitHub release + upload the asset
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine version and release type
+        id: ver
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            VER="${{ github.event.inputs.version }}"
+          else
+            VER="${GITHUB_REF_NAME#v}"    # strip leading v from the tag
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          case "$VER" in
+            *alpha*) RT=alpha ;;
+            *beta*)  RT=beta ;;
+            *)       RT=release ;;
+          esac
+          echo "reltype=$RT" >> "$GITHUB_OUTPUT"
+          echo "Building version '$VER' (release type: $RT)"
+
+      - name: Stamp version into both TOCs
+        run: |
+          VER="${{ steps.ver.outputs.version }}"
+          sed -i -E "s/^## Version:.*/## Version: ${VER}/" TwistedsCombatCues/TwistedsCombatCues.toc
+          sed -i -E "s/^## Version:.*/## Version: ${VER}/" TwistedsCombatCues_DB/TwistedsCombatCues_DB.toc
+          grep -H '## Version:' */*.toc
+
+      - name: Build ZIP (addon/ folders at archive root)
+        id: build
+        run: |
+          set -euo pipefail
+          VER="${{ steps.ver.outputs.version }}"
+          WS="$PWD"
+          STAGE="$(mktemp -d)"
+          cp -r TwistedsCombatCues     "$STAGE/TwistedsCombatCues"
+          cp -r TwistedsCombatCues_DB  "$STAGE/TwistedsCombatCues_DB"
+
+          # --- exclusions (dev-only / VCS / caches / archives) ---
+          find "$STAGE" -type d \( \
+              -name Tools -o -name tools -o -name scripts -o -name build-tools -o -name tests -o -name test \
+              -o -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .ruff_cache \
+              -o -name venv -o -name .venv -o -name env \
+              -o -name .git -o -name .github -o -name .vscode -o -name .idea \
+            \) -prune -exec rm -rf {} +
+          find "$STAGE" -type f \( \
+              -name '*.py' -o -name '*.pyc' -o -name '*.pyo' -o -name '*.pyd' \
+              -o -name '*.log' -o -name '*.bak' -o -name '*.tmp' -o -name '*.zip' -o -name '*.orig' \
+            \) -delete
+
+          # --- validation ---
+          if find "$STAGE" \( -name '*.py' -o -name '__pycache__' -o -name '.git' \) | grep -q .; then
+            echo "::error::dev/python files leaked into the package"; exit 1
+          fi
+          test -f "$STAGE/TwistedsCombatCues/TwistedsCombatCues.toc"       || { echo "::error::missing main TOC"; exit 1; }
+          test -f "$STAGE/TwistedsCombatCues_DB/TwistedsCombatCues_DB.toc" || { echo "::error::missing DB TOC"; exit 1; }
+          TOP="$(cd "$STAGE" && ls -1 | sort | tr '\n' ' ')"
+          if [ "$TOP" != "TwistedsCombatCues TwistedsCombatCues_DB " ]; then
+            echo "::error::staging root is not exactly the two addon folders: $TOP"; exit 1
+          fi
+
+          ZIP="TwistedsCombatCues-${VER}.zip"
+          ( cd "$STAGE" && zip -r -X "$WS/$ZIP" TwistedsCombatCues TwistedsCombatCues_DB >/dev/null )
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "Built $ZIP ($(du -h "$ZIP" | cut -f1))"
+          unzip -l "$ZIP" | head -20
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.build.outputs.zip }}
+          prerelease: ${{ steps.ver.outputs.reltype != 'release' }}
+          generate_release_notes: true
