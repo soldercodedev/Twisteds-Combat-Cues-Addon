@@ -7,10 +7,14 @@ name: Package and release
 #   2. stamps it into both TOCs,
 #   3. builds a CurseForge-ready ZIP from the `addon/` folder (the two addon folders
 #      end up at the ZIP root - no wrapper, no dev/Python files),
-#   4. publishes a GitHub Release with the ZIP attached (pre-release for alpha/beta).
+#   4. publishes a GitHub Release with the ZIP attached (pre-release for alpha/beta),
+#   5. uploads that same ZIP straight to CurseForge via the CurseForge Upload API.
 #
-# CurseForge is handled by CurseForge's own GitHub integration (which imports the ZIP
-# attached to each GitHub Release). No CurseForge API token is stored here.
+# CurseForge delivery uses two repo secrets:
+#   CF_API_TOKEN   - a CurseForge API token (https://legacy.curseforge.com/account/api-tokens)
+#   CF_PROJECT_ID  - the numeric CurseForge project id (from the project's "About" box)
+# If either secret is absent the CurseForge step is skipped (the GitHub Release still
+# publishes), so you can tag freely before wiring CurseForge up.
 
 on:
   push:
@@ -102,3 +106,55 @@ jobs:
           files: ${{ steps.build.outputs.zip }}
           prerelease: ${{ steps.ver.outputs.reltype != 'release' }}
           generate_release_notes: true
+
+      - name: Upload to CurseForge
+        env:
+          CF_API_TOKEN:  ${{ secrets.CF_API_TOKEN }}
+          CF_PROJECT_ID: ${{ secrets.CF_PROJECT_ID }}
+          VER:           ${{ steps.ver.outputs.version }}
+          RELTYPE:       ${{ steps.ver.outputs.reltype }}
+          ZIP:           ${{ steps.build.outputs.zip }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CF_API_TOKEN:-}" ] || [ -z "${CF_PROJECT_ID:-}" ]; then
+            echo "::warning::CF_API_TOKEN / CF_PROJECT_ID not set - skipping CurseForge upload."
+            exit 0
+          fi
+
+          # Derive the CurseForge game-version name from the TOC Interface (120007 -> 12.0.7).
+          IFACE="$(grep -m1 '## Interface:' TwistedsCombatCues/TwistedsCombatCues.toc | tr -dc '0-9')"
+          MAJ=$((10#${IFACE:0:$((${#IFACE}-4))})); MIN=$((10#${IFACE: -4:2})); PAT=$((10#${IFACE: -2}))
+          GAMEVER="${MAJ}.${MIN}.${PAT}"
+          echo "Game version from TOC: $GAMEVER (Interface $IFACE)"
+
+          # Map that name to CurseForge's numeric game-version id.
+          GVID="$(curl -sf -H "X-Api-Token: $CF_API_TOKEN" \
+                    https://wow.curseforge.com/api/game/versions \
+                  | jq -r --arg n "$GAMEVER" '[.[] | select(.name==$n)] | (first // {}) | .id // empty')"
+          if [ -z "$GVID" ]; then
+            echo "::error::CurseForge has no game version named '$GAMEVER' yet. Add it on the project's file page manually, or wait until CurseForge lists that patch."
+            exit 1
+          fi
+          echo "CurseForge game-version id: $GVID"
+
+          # Changelog from the tag's annotation, falling back to a one-liner.
+          CHANGELOG="$(git tag -l --format='%(contents)' "${GITHUB_REF_NAME:-}" 2>/dev/null || true)"
+          [ -z "$CHANGELOG" ] && CHANGELOG="Twisteds Combat Cues ${VER}"
+
+          META="$(jq -nc \
+            --arg cl "$CHANGELOG" \
+            --arg rt "$RELTYPE" \
+            --argjson gv "[$GVID]" \
+            '{changelog:$cl, changelogType:"markdown", gameVersions:$gv, releaseType:$rt}')"
+
+          echo "Uploading $ZIP to CurseForge project $CF_PROJECT_ID (releaseType=$RELTYPE)..."
+          HTTP="$(curl -sS -o /tmp/cf_resp.json -w '%{http_code}' -X POST \
+                    -H "X-Api-Token: $CF_API_TOKEN" \
+                    -F "metadata=$META" \
+                    -F "file=@${ZIP}" \
+                    "https://wow.curseforge.com/api/projects/${CF_PROJECT_ID}/upload-file")"
+          echo "HTTP $HTTP"; cat /tmp/cf_resp.json; echo
+          case "$HTTP" in
+            2*) echo "CurseForge upload OK (file id: $(jq -r '.id // "?"' /tmp/cf_resp.json))" ;;
+            *)  echo "::error::CurseForge upload failed (HTTP $HTTP)"; exit 1 ;;
+          esac
