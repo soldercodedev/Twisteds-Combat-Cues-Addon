@@ -15,7 +15,6 @@ Font Licence.
 | `Russo One.ttf` | SIL OFL 1.1 | `OFL-RussoOne.txt` |
 | `Ubuntu.ttf` | Ubuntu Font Licence 1.0 | `UFL-Ubuntu.txt` |
 
-**Not covered here.** The other fonts in `assets/fonts/` are *not* open-licensed and are
-not covered by these files - see `../../THIRD_PARTY_NOTICES.md`. The proprietary ones
-(`Arial *`, `Gotham *`, `Avant Garde Naowh`) are **not redistributable** and should be
-removed before a public release.
+**Other fonts.** The remaining fonts in `assets/fonts/` (Expressway, Future X, Homespun,
+KMT) are from various community sources; they are credited in
+`../../THIRD_PARTY_NOTICES.md` rather than here.
