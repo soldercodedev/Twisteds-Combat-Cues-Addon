@@ -1,0 +1,36 @@
+name: Publish to CurseForge
+
+# Standalone CurseForge publish (manual only). Builds the ZIP from the current checkout
+# and uploads it to CurseForge - use it to retry a failed CurseForge upload, or to publish
+# there without touching GitHub Releases or Wago. Needs CF_API_TOKEN + CF_PROJECT_ID.
+#
+# For the normal "publish everywhere on tag" flow, use the "Package and release" workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (e.g. 1.2.0-beta.3)"
+        required: true
+
+jobs:
+  curseforge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build package
+        id: build
+        uses: ./.github/actions/build
+        with:
+          version: ${{ github.event.inputs.version }}
+
+      - name: Upload to CurseForge
+        uses: ./.github/actions/curseforge-upload
+        with:
+          token:      ${{ secrets.CF_API_TOKEN }}
+          project-id: ${{ secrets.CF_PROJECT_ID }}
+          version:    ${{ steps.build.outputs.version }}
+          reltype:    ${{ steps.build.outputs.reltype }}
+          zip:        ${{ steps.build.outputs.zip }}
+          patch:      ${{ steps.build.outputs.patch }}

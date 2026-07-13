@@ -1,0 +1,66 @@
+name: "Upload to Wago Addons"
+description: "Upload a built ZIP to Wago Addons via the manual API. No-ops (with a warning) if the api key/project id are empty."
+
+inputs:
+  api-key:
+    description: "Wago API key."
+    required: false
+    default: ""
+  project-id:
+    description: "Wago 8-char project id."
+    required: false
+    default: ""
+  version:
+    description: "Version string (Wago release label)."
+    required: true
+  reltype:
+    description: "release | beta | alpha (mapped to Wago stability)."
+    required: true
+  zip:
+    description: "Path to the ZIP to upload."
+    required: true
+  patch:
+    description: "Retail patch to publish for, e.g. 12.0.7."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        WAGO_API_KEY:    ${{ inputs.api-key }}
+        WAGO_PROJECT_ID: ${{ inputs.project-id }}
+        VER:             ${{ inputs.version }}
+        RELTYPE:         ${{ inputs.reltype }}
+        ZIP:             ${{ inputs.zip }}
+        PATCH:           ${{ inputs.patch }}
+      run: |
+        set -euo pipefail
+        if [ -z "${WAGO_API_KEY:-}" ] || [ -z "${WAGO_PROJECT_ID:-}" ]; then
+          echo "::warning::WAGO_API_KEY / WAGO_PROJECT_ID not set - skipping Wago Addons upload."
+          exit 0
+        fi
+
+        # Wago stability: release -> stable; alpha/beta pass through.
+        case "$RELTYPE" in release) STAB=stable ;; *) STAB="$RELTYPE" ;; esac
+
+        # Changelog = the latest section of the user-facing CHANGELOG.md.
+        CHANGELOG="$(awk '/^## /{c++} c==1' TwistedsCombatCues/CHANGELOG.md 2>/dev/null || true)"
+        [ -z "$CHANGELOG" ] && CHANGELOG="Twisteds Combat Cues ${VER}"
+
+        META="$(jq -nc --arg label "$VER" --arg stab "$STAB" --arg cl "$CHANGELOG" --arg patch "$PATCH" \
+          '{label:$label, stability:$stab, changelog:$cl, supported_retail_patch:$patch}')"
+
+        echo "Uploading $ZIP to Wago project $WAGO_PROJECT_ID (stability=$STAB, patch=$PATCH)..."
+        # metadata via --form-string (see the CurseForge action for why); file keeps -F.
+        HTTP="$(curl -sS -o /tmp/wago_resp.json -w '%{http_code}' -X POST \
+                  -H "authorization: Bearer $WAGO_API_KEY" \
+                  -H "accept: application/json" \
+                  --form-string "metadata=$META" \
+                  -F "file=@${ZIP}" \
+                  "https://addons.wago.io/api/projects/${WAGO_PROJECT_ID}/version")"
+        echo "HTTP $HTTP"; cat /tmp/wago_resp.json; echo
+        case "$HTTP" in
+          2*) echo "Wago Addons upload OK" ;;
+          *)  echo "::error::Wago Addons upload failed (HTTP $HTTP)"; exit 1 ;;
+        esac

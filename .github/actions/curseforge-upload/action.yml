@@ -1,0 +1,73 @@
+name: "Upload to CurseForge"
+description: "Upload a built ZIP to CurseForge via the Upload API. No-ops (with a warning) if the token/project id are empty."
+
+inputs:
+  token:
+    description: "CurseForge API token."
+    required: false
+    default: ""
+  project-id:
+    description: "CurseForge numeric project id."
+    required: false
+    default: ""
+  version:
+    description: "Version string (for the fallback changelog line)."
+    required: true
+  reltype:
+    description: "release | beta | alpha (CurseForge releaseType)."
+    required: true
+  zip:
+    description: "Path to the ZIP to upload."
+    required: true
+  patch:
+    description: "Retail patch to publish for, e.g. 12.0.7."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        CF_API_TOKEN:  ${{ inputs.token }}
+        CF_PROJECT_ID: ${{ inputs.project-id }}
+        VER:           ${{ inputs.version }}
+        RELTYPE:       ${{ inputs.reltype }}
+        ZIP:           ${{ inputs.zip }}
+        GAMEVER:       ${{ inputs.patch }}
+      run: |
+        set -euo pipefail
+        if [ -z "${CF_API_TOKEN:-}" ] || [ -z "${CF_PROJECT_ID:-}" ]; then
+          echo "::warning::CF_API_TOKEN / CF_PROJECT_ID not set - skipping CurseForge upload."
+          exit 0
+        fi
+
+        echo "Game version from TOC: $GAMEVER"
+        # Map the patch name to CurseForge's numeric game-version id.
+        GVID="$(curl -sf -H "X-Api-Token: $CF_API_TOKEN" \
+                  https://wow.curseforge.com/api/game/versions \
+                | jq -r --arg n "$GAMEVER" '[.[] | select(.name==$n)] | (first // {}) | .id // empty')"
+        if [ -z "$GVID" ]; then
+          echo "::error::CurseForge has no game version named '$GAMEVER' yet. Add it on the project's file page, or wait until CurseForge lists that patch."
+          exit 1
+        fi
+        echo "CurseForge game-version id: $GVID"
+
+        # Changelog = the latest section of the user-facing CHANGELOG.md.
+        CHANGELOG="$(awk '/^## /{c++} c==1' TwistedsCombatCues/CHANGELOG.md 2>/dev/null || true)"
+        [ -z "$CHANGELOG" ] && CHANGELOG="Twisteds Combat Cues ${VER}"
+
+        META="$(jq -nc --arg cl "$CHANGELOG" --arg rt "$RELTYPE" --argjson gv "[$GVID]" \
+          '{changelog:$cl, changelogType:"markdown", gameVersions:$gv, releaseType:$rt}')"
+
+        echo "Uploading $ZIP to CurseForge project $CF_PROJECT_ID (releaseType=$RELTYPE)..."
+        # metadata via --form-string (NOT -F): ';'/'@'/'<' in the JSON would be misread by -F.
+        HTTP="$(curl -sS -o /tmp/cf_resp.json -w '%{http_code}' -X POST \
+                  -H "X-Api-Token: $CF_API_TOKEN" \
+                  --form-string "metadata=$META" \
+                  -F "file=@${ZIP}" \
+                  "https://wow.curseforge.com/api/projects/${CF_PROJECT_ID}/upload-file")"
+        echo "HTTP $HTTP"; cat /tmp/cf_resp.json; echo
+        case "$HTTP" in
+          2*) echo "CurseForge upload OK (file id: $(jq -r '.id // "?"' /tmp/cf_resp.json))" ;;
+          *)  echo "::error::CurseForge upload failed (HTTP $HTTP)"; exit 1 ;;
+        esac
