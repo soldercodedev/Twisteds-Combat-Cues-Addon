@@ -8,13 +8,15 @@ name: Package and release
 #   3. builds a CurseForge-ready ZIP from the `addon/` folder (the two addon folders
 #      end up at the ZIP root - no wrapper, no dev/Python files),
 #   4. publishes a GitHub Release with the ZIP attached (pre-release for alpha/beta),
-#   5. uploads that same ZIP straight to CurseForge via the CurseForge Upload API.
+#   5. uploads that same ZIP to CurseForge via the CurseForge Upload API,
+#   6. uploads that same ZIP to Wago Addons via the Wago manual API.
 #
-# CurseForge delivery uses two repo secrets:
-#   CF_API_TOKEN   - a CurseForge API token (https://legacy.curseforge.com/account/api-tokens)
-#   CF_PROJECT_ID  - the numeric CurseForge project id (from the project's "About" box)
-# If either secret is absent the CurseForge step is skipped (the GitHub Release still
-# publishes), so you can tag freely before wiring CurseForge up.
+# Delivery uses repo secrets; each uploader is skipped if its secrets are absent, so you
+# can tag freely before wiring a platform up (the GitHub Release still publishes):
+#   CurseForge:  CF_API_TOKEN   (https://legacy.curseforge.com/account/api-tokens)
+#                CF_PROJECT_ID  (numeric id from the project's "About" box)
+#   Wago Addons: WAGO_API_KEY   (https://addons.wago.io/account/apikeys)
+#                WAGO_PROJECT_ID (8-char id from https://addons.wago.io/developers)
 
 on:
   push:
@@ -177,4 +179,53 @@ jobs:
           case "$HTTP" in
             2*) echo "CurseForge upload OK (file id: $(jq -r '.id // "?"' /tmp/cf_resp.json))" ;;
             *)  echo "::error::CurseForge upload failed (HTTP $HTTP)"; exit 1 ;;
+          esac
+
+      - name: Upload to Wago Addons
+        env:
+          WAGO_API_KEY:    ${{ secrets.WAGO_API_KEY }}
+          WAGO_PROJECT_ID: ${{ secrets.WAGO_PROJECT_ID }}
+          VER:             ${{ steps.ver.outputs.version }}
+          RELTYPE:         ${{ steps.ver.outputs.reltype }}
+          ZIP:             ${{ steps.build.outputs.zip }}
+        run: |
+          set -euo pipefail
+          if [ -z "${WAGO_API_KEY:-}" ] || [ -z "${WAGO_PROJECT_ID:-}" ]; then
+            echo "::warning::WAGO_API_KEY / WAGO_PROJECT_ID not set - skipping Wago Addons upload."
+            exit 0
+          fi
+
+          # Retail patch string from the TOC Interface (120007 -> 12.0.7). Wago wants a
+          # dotted patch like "12.0.7"; valid values are listed at
+          # https://addons.wago.io/api/data/game
+          IFACE="$(grep -m1 '## Interface:' TwistedsCombatCues/TwistedsCombatCues.toc | tr -dc '0-9')"
+          MAJ=$((10#${IFACE:0:$((${#IFACE}-4))})); MIN=$((10#${IFACE: -4:2})); PAT=$((10#${IFACE: -2}))
+          PATCH="${MAJ}.${MIN}.${PAT}"
+
+          # Wago stability: release -> stable; alpha/beta pass through.
+          case "$RELTYPE" in release) STAB=stable ;; *) STAB="$RELTYPE" ;; esac
+
+          # Same notes as CurseForge/GitHub: the latest section of the user-facing changelog.
+          CHANGELOG="$(awk '/^## /{c++} c==1' TwistedsCombatCues/CHANGELOG.md 2>/dev/null || true)"
+          [ -z "$CHANGELOG" ] && CHANGELOG="Twisteds Combat Cues ${VER}"
+
+          META="$(jq -nc \
+            --arg label "$VER" \
+            --arg stab "$STAB" \
+            --arg cl "$CHANGELOG" \
+            --arg patch "$PATCH" \
+            '{label:$label, stability:$stab, changelog:$cl, supported_retail_patch:$patch}')"
+
+          echo "Uploading $ZIP to Wago project $WAGO_PROJECT_ID (stability=$STAB, patch=$PATCH)..."
+          # metadata via --form-string (see the CurseForge step for why); file keeps -F.
+          HTTP="$(curl -sS -o /tmp/wago_resp.json -w '%{http_code}' -X POST \
+                    -H "authorization: Bearer $WAGO_API_KEY" \
+                    -H "accept: application/json" \
+                    --form-string "metadata=$META" \
+                    -F "file=@${ZIP}" \
+                    "https://addons.wago.io/api/projects/${WAGO_PROJECT_ID}/version")"
+          echo "HTTP $HTTP"; cat /tmp/wago_resp.json; echo
+          case "$HTTP" in
+            2*) echo "Wago Addons upload OK" ;;
+            *)  echo "::error::Wago Addons upload failed (HTTP $HTTP)"; exit 1 ;;
           esac
