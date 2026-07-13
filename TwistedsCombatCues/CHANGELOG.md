@@ -1,5 +1,24 @@
 # Twisteds Combat Cues - What's New
 
+## 1.2.0-beta.3
+
+- **[NEW]** The menu is now sorted into sections (Cues / Settings / Help & About) so
+  pages are easier to find.
+- **[NEW]** Resize and place the marker bar: a **Position & Size** button opens an
+  on-screen mover - drag the panel to move the bar, and use its slider to resize it.
+- **[NEW]** Choose when the marker bar shows: always, in any instance, in dungeons, in
+  raids, or only while in a group.
+- **[NEW]** The Help page now points you to our Discord and its AI assistant, with a
+  one-click join button.
+- **[CHANGE]** The marker bar's lock/unlock was replaced by the new Position & Size mover.
+
+### Known issues
+
+- **[KNOWN]** Resizing the marker bar can be a little rough - the scaling isn't perfectly
+  smooth yet.
+- **[KNOWN]** Range checks can give mixed results in some instances; we're still tuning how
+  they behave there.
+
 ## 1.2.0-beta.2
 
 - **[BUG FIX]** Fixed error spam in combat and dungeons ("secret value" Lua errors).

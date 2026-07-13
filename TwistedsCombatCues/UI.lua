@@ -272,6 +272,10 @@ local function makeButton(parent)
         elseif self._kind == "danger" then
             self._normal, self._hover = { 0.32, 0.14, 0.15 }, { 0.5, 0.22, 0.23 }
             self.fs:SetTextColor(1, 0.72, 0.72)
+        elseif self._kind == "discord" then
+            self._normal = { 0.345, 0.396, 0.949 }         -- Discord "blurple" (#5865F2); brand color, not themed
+            self._hover  = lighten({ 0.345, 0.396, 0.949 }, 0.12)
+            self.fs:SetTextColor(1, 1, 1)
         else
             self._normal = { C.card[1], C.card[2], C.card[3] }
             self._hover = darken(C.accent, 0.35)  -- a darker shade of the accent
@@ -1850,7 +1854,7 @@ local function buildWhatsNew()
 
     local cur
     for line in (text .. "\n"):gmatch("(.-)\n") do
-        local ver     = line:match("^##%s+(.+)")
+        local ver     = line:match("^##+%s+(.+)")   -- ## version or ### sub-header (e.g. Known issues)
         local bullet  = line:match("^%-%s+(.+)")
         local cont    = line:match("^%s+(%S.*)")
         if ver then
@@ -2184,6 +2188,11 @@ local ANNOUNCE_WHERE = {
 local FOCUS_SOURCE = {
     { "smart", "Mouseover, else target" }, { "target", "Current target" }, { "mouseover", "Mouseover only" },
 }
+-- When the on-screen marker palette is visible (context gate; evaluated out of combat).
+local PALETTE_WHERE = {
+    { "always", "Always" }, { "any_instance", "In any instance" },
+    { "party", "In dungeons" }, { "raid", "In raids" }, { "group", "In a group" },
+}
 
 ----------------------------------------------------------------------
 -- On-screen marker palette: a small movable bar of the 8 raid markers.
@@ -2197,6 +2206,7 @@ local RT_COORDS = {  -- 4x4 atlas; index 1..8 = Star,Circle,Diamond,Triangle,Moo
     { 0, 0.25, 0.25, 0.5 }, { 0.25, 0.5, 0.25, 0.5 }, { 0.5, 0.75, 0.25, 0.5 }, { 0.75, 1, 0.25, 0.5 },
 }
 local markerPalette
+local paletteMover      -- on-screen "edit mode" overlay: drag to move + a scale slider
 
 function TCC.UpdateMarkerPalette()
     if not markerPalette then return end
@@ -2211,11 +2221,19 @@ local function ensureMarkerPalette()
     p:SetSize(EDGE * 2 + 8 * CELL + 7 * GAP, CELL + EDGE * 2)
     p:SetFrameStrata("MEDIUM"); p:SetClampedToScreen(true); p:SetMovable(true); p:EnableMouse(true)
     p:RegisterForDrag("LeftButton")
-    p:SetScript("OnDragStart", function(self) if not (TCC.db.macro and TCC.db.macro.paletteLocked) then self:StartMoving() end end)
+    -- Draggable only while the on-screen mover is active (and never in combat).
+    p:SetScript("OnDragStart", function(self)
+        if TCC._paletteMoverOn and not (InCombatLockdown and InCombatLockdown()) then self:StartMoving() end
+    end)
     p:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()
         local pt, _, _, xo, yo = self:GetPoint()
         if TCC.db.macro then TCC.db.macro.palettePos = { pt, xo, yo } end
+    end)
+    -- If the bar hides for any reason, close its mover too (safe: no secret/protected work).
+    p:SetScript("OnHide", function()
+        if paletteMover then paletteMover:Hide() end
+        TCC._paletteMoverOn = false
     end)
     stylePanel(p, C.panel, C.border)
     -- Deliberately NOT in UISpecialFrames: the palette is only toggled via the Focus
@@ -2254,6 +2272,7 @@ function TCC.SetMarkerPaletteShown(show)
     if not show then if markerPalette then markerPalette:Hide() end return end
     if InCombatLockdown and InCombatLockdown() and not markerPalette then return end  -- can't build secure frames in combat
     local p = ensureMarkerPalette()
+    p:SetScale(tonumber(TCC.db.macro and TCC.db.macro.paletteScale) or 1)
     local pos = TCC.db.macro and TCC.db.macro.palettePos
     p:ClearAllPoints()
     if pos and pos[1] then p:SetPoint(pos[1], UIParent, pos[1], pos[2] or 0, pos[3] or 0)
@@ -2262,15 +2281,141 @@ function TCC.SetMarkerPaletteShown(show)
     p:Show()
 end
 
--- Flip the marker palette on/off, persist it, and keep the Focus Tools checkbox in sync.
--- The single entry point for the UI toggle and /tcc togglemarkers. Returns the new state.
+-- Apply the saved size to the marker bar live. SetScale scales the anchor's pixel offset
+-- too, which would fling the bar across the screen -- so rescale the offset by old/new to
+-- keep its on-screen position fixed. SetScale is cosmetic (not a protected show/hide), so
+-- it's safe any time the bar exists.
+function TCC.ApplyMarkerPaletteScale()
+    local p = markerPalette
+    if not p then return end
+    local scale = tonumber(TCC.db.macro and TCC.db.macro.paletteScale) or 1
+    local point, rel, relPoint, dx, dy = p:GetPoint()
+    local os = p:GetScale()
+    p:SetScale(scale)
+    if point and dx and dy and os and os > 0 and scale > 0 then
+        dx, dy = dx * os / scale, dy * os / scale
+        p:ClearAllPoints()
+        p:SetPoint(point, rel or UIParent, relPoint or point, dx, dy)
+        if TCC.db.macro then TCC.db.macro.palettePos = { point, dx, dy } end
+    end
+end
+
+-- Is the palette allowed to show in the current content? (context gate)
+local function paletteContextAllows(setting)
+    if not setting or setting == "always" then return true end
+    if setting == "group" then return IsInGroup and IsInGroup() and true or false end
+    local inInstance, itype = false, "none"
+    if IsInInstance then inInstance, itype = IsInInstance() end
+    if setting == "any_instance" then return inInstance and true or false end
+    return itype == setting          -- "party" (dungeon) / "raid"
+end
+
+-- Show or hide the palette based on the master toggle AND the visibility setting. The one
+-- place that decides whether the bar is on screen. No-ops in combat (you can't show/hide a
+-- frame with secure children then) and is re-run on PLAYER_REGEN_ENABLED to catch up.
+function TCC.RefreshMarkerPaletteVisibility()
+    local m = TCC.db and TCC.db.macro
+    if not m then return end
+    if InCombatLockdown and InCombatLockdown() then return end   -- deferred; re-applied when combat ends
+    if m.paletteShown and paletteContextAllows(m.paletteVisibility) then
+        TCC.SetMarkerPaletteShown(true)
+    elseif markerPalette then
+        markerPalette:Hide()
+    end
+end
+
+-- Re-evaluate palette visibility when the content context changes.
+local paletteWatcher
+function TCC.EnsureMarkerPaletteWatcher()
+    if paletteWatcher then return end
+    paletteWatcher = CreateFrame("Frame")
+    paletteWatcher:RegisterEvent("PLAYER_ENTERING_WORLD")
+    paletteWatcher:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+    paletteWatcher:RegisterEvent("GROUP_ROSTER_UPDATE")
+    paletteWatcher:RegisterEvent("PLAYER_REGEN_ENABLED")   -- catch up on changes deferred during combat
+    paletteWatcher:SetScript("OnEvent", function() TCC.RefreshMarkerPaletteVisibility() end)
+end
+
+-- Set the marker palette master on/off and apply it. Shared by the Focus Tools checkbox
+-- and /tcc togglemarkers. The bar contains SECURE buttons, so it can't be shown/hidden
+-- DURING combat -- in that case we save the choice and it takes effect the moment combat
+-- ends (with a heads-up so it doesn't look broken).
+function TCC.SetMarkerPaletteEnabled(on)
+    local m = TCC.db and TCC.db.macro
+    if not m then return end
+    m.paletteShown = on and true or false
+    if TCC.EnsureMarkerPaletteWatcher then TCC.EnsureMarkerPaletteWatcher() end
+    if InCombatLockdown and InCombatLockdown() then
+        print(TCC.PREFIX .. "Marker palette will " .. (m.paletteShown and "appear" or "hide")
+            .. " when you leave combat (can't change it mid-fight).")
+    else
+        TCC.RefreshMarkerPaletteVisibility()
+    end
+end
+
+-- Flip the marker palette on/off. The single entry point for /tcc togglemarkers. Returns
+-- the new state.
 function TCC.ToggleMarkerPalette()
     if not (TCC.db and TCC.db.macro) then return end
     local v = not TCC.db.macro.paletteShown
-    TCC.db.macro.paletteShown = v
-    TCC.SetMarkerPaletteShown(v)
+    TCC.SetMarkerPaletteEnabled(v)
     if TCC.RefreshManager then TCC.RefreshManager() end
     return v
+end
+
+-- On-screen mover: a small panel above the bar with a drag hint, a Size slider, and Done.
+-- The bar itself is what you drag (its OnDragStart is gated on TCC._paletteMoverOn).
+local function ensurePaletteMover()
+    if paletteMover then return paletteMover end
+    local m = CreateFrame("Frame", nil, UIParent)
+    m:SetSize(280, 62); m:SetFrameStrata("DIALOG"); m:SetClampedToScreen(true)
+    m:EnableMouse(true); m:RegisterForDrag("LeftButton")
+    stylePanel(m, C.panel, C.accent)
+    -- The bar is fully covered by its 8 buttons, so THIS panel is the drag handle: dragging
+    -- it moves the bar (which is anchored under it, so it follows).
+    m:SetScript("OnDragStart", function()
+        if markerPalette and not (InCombatLockdown and InCombatLockdown()) then markerPalette:StartMoving() end
+    end)
+    m:SetScript("OnDragStop", function()
+        if not markerPalette then return end
+        markerPalette:StopMovingOrSizing()
+        local pt, _, _, xo, yo = markerPalette:GetPoint()
+        if TCC.db.macro then TCC.db.macro.palettePos = { pt, xo, yo } end
+    end)
+    local hint = m:CreateFontString(nil, "OVERLAY"); hint:SetFont(FONT, 11)
+    hint:SetPoint("TOPLEFT", 12, -9); hint:SetTextColor(unpack(C.subtext))
+    hint:SetText("|cffffffffDrag this panel|r to move the bar")
+    local done = makeButton(m)
+    done:Configure("Done", 56, 18, "primary", function() TCC.SetMarkerPaletteMover(false) end)
+    done:ClearAllPoints(); done:SetPoint("TOPRIGHT", -8, -7)
+    local sizeLbl = m:CreateFontString(nil, "OVERLAY"); sizeLbl:SetFont(FONT, 11)
+    sizeLbl:SetPoint("BOTTOMLEFT", 12, 11); sizeLbl:SetTextColor(unpack(C.subtext)); sizeLbl:SetText("Size")
+    m.slider = makeSlider(m); m.slider:ClearAllPoints(); m.slider:SetPoint("BOTTOMLEFT", 46, 11)
+    m.slider:Configure(198, 0.6, 2.0, 0.05,
+        function() return tonumber(TCC.db.macro and TCC.db.macro.paletteScale) or 1 end,
+        function(v) if TCC.db.macro then TCC.db.macro.paletteScale = v end; TCC.ApplyMarkerPaletteScale() end, "%.2f")
+    paletteMover = m
+    return m
+end
+
+-- Turn the on-screen mover on/off (drag-to-move + resize). Out of combat only, and only
+-- while the bar itself is shown.
+function TCC.SetMarkerPaletteMover(on)
+    if on then
+        if not markerPalette or not markerPalette:IsShown() then return end
+        if InCombatLockdown and InCombatLockdown() then
+            print(TCC.PREFIX .. "Can't reposition the marker bar during combat.")
+        else
+            local m = ensurePaletteMover()
+            m:ClearAllPoints(); m:SetPoint("BOTTOM", markerPalette, "TOP", 0, 12)
+            m:Show()
+            TCC._paletteMoverOn = true
+        end
+    else
+        if paletteMover then paletteMover:Hide() end
+        TCC._paletteMoverOn = false
+    end
+    if TCC.RefreshManager then TCC.RefreshManager() end
 end
 
 local function macroBox(text, x, y)
@@ -2288,6 +2433,8 @@ local function buildMacros()
     if d.macro.focusMsg == nil then d.macro.focusMsg = "Focus {rt}" end
     if d.macro.readyMsg == nil then d.macro.readyMsg = "My interrupt target is {rt}" end
     d.macro.announceInstance = d.macro.announceInstance or "any"
+    d.macro.paletteScale = tonumber(d.macro.paletteScale) or 1
+    d.macro.paletteVisibility = d.macro.paletteVisibility or "always"
 
     CLabel("FOCUS TOOLS", x, y, C.accent, 13); y = y - 20
     local _, ih = CWrap("Generate ready-made macros. |cffffffffCreate Macro|r saves it to your "
@@ -2335,15 +2482,24 @@ local function buildMacros()
 
     -- On-screen marker palette (change your marker on the fly).
     setTip(CToggle(x, y, d.macro.paletteShown, function(v)
-        d.macro.paletteShown = v
-        if TCC.SetMarkerPaletteShown then TCC.SetMarkerPaletteShown(v) end
+        if TCC.SetMarkerPaletteEnabled then TCC.SetMarkerPaletteEnabled(v) end
         TCC.RefreshManager()
     end), "Marker palette", "Show a small movable bar of the 8 raid markers on screen. Click one to |cffffffff focus + mark|r your target with it - live, even in combat - and make it your focus marker. Handy if someone's already using yours.")
     CLabel("Show marker palette on screen", x + 46, y - 2, C.text)
     if d.macro.paletteShown then
-        setTip(CToggle(x + 290, y, d.macro.paletteLocked, function(v) d.macro.paletteLocked = v end),
-            "Lock palette", "Lock the palette in place so it can't be dragged.")
-        CLabel("Lock", x + 336, y - 2, C.subtext)
+        -- Position & Size: opens an on-screen mover (drag to move + a resize slider).
+        local moverOn = TCC._paletteMoverOn and true or false
+        setTip(CButton(x + 300, y - 1, 130, moverOn and "Done moving" or "Position & Size",
+            moverOn and "primary" or "default", function()
+                if TCC.SetMarkerPaletteMover then TCC.SetMarkerPaletteMover(not TCC._paletteMoverOn) end
+            end), "Position & size",
+            "Show an on-screen mover: drag the bar to reposition it, and use the mover's slider to resize it.")
+        y = y - 34
+        CLabel("Show", x + 46, y - 2, C.subtext)
+        setTip(CDD(x + 96, y), "Show where",
+            "When the marker bar is on screen (checked when you change zone/group; updates after combat)."):SetChoices(
+            170, PALETTE_WHERE, function() return d.macro.paletteVisibility or "always" end,
+            function(v) d.macro.paletteVisibility = v; if TCC.RefreshMarkerPaletteVisibility then TCC.RefreshMarkerPaletteVisibility() end end)
     end
     y = y - 44
 
@@ -2596,6 +2752,17 @@ local function buildHelp()
         x, y, CONTENT_W - 44, C.subtext, 12)
     y = y - (ih + 14)
 
+    -- Community + AI assistant highlight (kept up top so it's the first thing you see).
+    CSection("NEED A HAND?", x, y); y = y - 26
+    local _, ah = CWrap("Our Discord has a friendly |cffffffffAI assistant|r that walks you through "
+        .. "building alerts, using Focus Tools, and fixing problems - in plain English, any time you "
+        .. "need it. Ask it anything.", x, y, CONTENT_W - 44, C.subtext, 12)
+    y = y - (ah + 12)
+    setTip(CButton(x, y, 150, "Join the Discord", "discord", function()
+        ShowLinkDialog("Discord invite - copy this link (Ctrl+C)", "https://discord.com/invite/pN5vYDrQ5j")
+    end), "Join the Discord", "Copy our Discord invite - chat with the community and the AI helper.")
+    y = y - 42
+
     CSection("SLASH COMMANDS", x, y); y = y - 28
     local rowH, boxW = 26, CONTENT_W - 40
     local boxH = #HELP_COMMANDS * rowH + 12
@@ -2754,12 +2921,17 @@ local function EnsureManager()
     local sedge = side:CreateTexture(nil, "ARTWORK"); paint(sedge, C.border); sedge:SetWidth(1)
     sedge:SetPoint("TOPRIGHT"); sedge:SetPoint("BOTTOMRIGHT")
 
-    -- Page navigation rows (fixed, with icons + selection highlight).
+    -- Page navigation, grouped into labelled sections. `{ header = ... }` entries are dim
+    -- non-clickable group titles; the rest are pages (view/label/icon). Getting Started sits
+    -- on top with no header.
     local PAGES = {
         { view = "getting-started", label = "Getting Started", icon = ICON_DIR .. "rocket.tga" },
+        { header = "CUES" },
         { view = "alerts",  label = "Alerts",          icon = ICON_DIR .. "bell.tga" },
-        { view = "global",  label = "Global Options",   icon = ICON_DIR .. "settings.tga" },
         { view = "macros",  label = "Focus Tools",      icon = ICON_DIR .. "crosshair.tga" },
+        { header = "SETTINGS" },
+        { view = "global",  label = "Global Options",   icon = ICON_DIR .. "settings.tga" },
+        { header = "HELP & ABOUT" },
         { view = "debug",   label = "Live Diagnostics", icon = ICON_DIR .. "activity.tga" },
         { view = "help",    label = "Help & Commands",  icon = ICON_DIR .. "help.tga" },
         { view = "whatsnew", label = "What's New",       icon = ICON_DIR .. "star.tga" },
@@ -2768,11 +2940,18 @@ local function EnsureManager()
     mgr.toolRows = {}
     local ty = -12
     for _, t in ipairs(PAGES) do
-        local r = makeNavRow(side); r:ClearAllPoints(); r:SetPoint("TOPLEFT", 8, ty)
-        r.icon:SetTexture(t.icon); r.fs:SetText(t.label); r._view = t.view
-        r:SetScript("OnClick", function() TCC.uiView = t.view; TCC.RefreshManager() end)
-        mgr.toolRows[#mgr.toolRows + 1] = r
-        ty = ty - 32
+        if t.header then
+            ty = ty - 10                              -- extra breathing room above each group
+            local h = side:CreateFontString(nil, "OVERLAY"); h:SetFont(FONT, 10)
+            h:SetPoint("TOPLEFT", 16, ty - 2); h:SetTextColor(unpack(C.subtext)); h:SetText(t.header)
+            ty = ty - 20
+        else
+            local r = makeNavRow(side); r:ClearAllPoints(); r:SetPoint("TOPLEFT", 8, ty)
+            r.icon:SetTexture(t.icon); r.fs:SetText(t.label); r._view = t.view
+            r:SetScript("OnClick", function() TCC.uiView = t.view; TCC.RefreshManager() end)
+            mgr.toolRows[#mgr.toolRows + 1] = r
+            ty = ty - 32
+        end
     end
 
     -- Bottom-of-sidebar action: drag every on-screen alert into place at once.

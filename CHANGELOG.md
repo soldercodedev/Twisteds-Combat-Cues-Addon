@@ -2,6 +2,31 @@
 
 All notable changes to Twisteds Combat Cues are recorded here.
 
+## [1.2.0-beta.3] - 2026-07-12
+
+### Added
+- Sidebar navigation grouped into labeled sections (Cues / Settings / Help & About).
+  Header rows are non-clickable and never enter the selectable nav set.
+- Marker palette **size** and content-based **visibility** (always / any instance /
+  dungeon / raid / group), re-evaluated on zone/group changes out of combat.
+- On-screen **"Position & Size" mover** for the marker palette, replacing the old
+  lock/unlock toggle. The bar is fully covered by its secure buttons, so the mover panel
+  itself is the drag handle; it carries a live size slider.
+- Discord **join button** + AI-assistant highlight on the Help page (new `discord` button
+  style; opens the invite in the copy dialog since addons can't open a browser).
+
+### Changed
+- Marker palette lock/unlock replaced by the mover. Scaling now rescales the anchor offset
+  so the bar keeps its on-screen position instead of leaping across the screen.
+- Explicit palette on/off (Focus Tools checkbox and `/tcc togglemarkers`) share one path
+  and print a heads-up if toggled during combat (secure frames can't be shown/hidden
+  mid-fight; the change is applied the moment combat ends).
+
+### Known issues
+- Marker-bar scaling isn't perfectly smooth yet.
+- Range checks can behave inconsistently in some instances (still tuning the
+  distance/secret-value handling there).
+
 ## [1.2.0-beta.2] - 2026-07-12
 
 Compatibility pass for **WoW Midnight (12.0.7)** and its new "secret value" system,

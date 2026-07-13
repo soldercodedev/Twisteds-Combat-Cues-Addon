@@ -1,7 +1,7 @@
 -- Twisteds Combat Cues (TCC)
 -- Rule-based audible/visual cue engine.
 -- A rule = a nested tree of conditions (AND/OR groups) + an action (sound/visual/chat).
--- Author: Twistedfury-Zul'jin  |  Version: 1.2.0-beta.2
+-- Author: Twistedfury-Zul'jin  |  Version: 1.2.0-beta.3
 local addonName, TCC = ...
 
 local PREFIX = "|cff33ff99Twisteds Combat Cues:|r "
@@ -108,9 +108,11 @@ local DEFAULTS = {
         announceReady   = false,           -- announce when a ready check starts
         announceInstance = "any",          -- restrict announces to a content type (M+ but not raids, etc.)
         focusTarget     = "smart",         -- focus macro source: smart (mouseover>target) / target / mouseover
-        paletteShown    = false,           -- on-screen marker palette
+        paletteShown    = false,           -- on-screen marker palette (master on/off)
         paletteLocked   = false,
         palettePos      = nil,
+        paletteScale    = 1.0,             -- marker bar size (0.6 - 2.0)
+        paletteVisibility = "always",      -- when the bar is shown: always / any_instance / party / raid / group
         focusMsg        = "Focus {rt}",             -- {rt} = marker icon (target-name tokens no longer supported)
         readyMsg        = "My interrupt target is {rt}",  -- no target exists at a ready check
     },
@@ -1177,8 +1179,9 @@ eventFrame:SetScript("OnEvent", function(_, event, arg1)
         TCC.UpgradeSpellIds()   -- name -> id while name lookups still work (open world)
         TCC.RebuildEngine()
         TCC.Evaluate()
-        if TCC.SetMarkerPaletteShown and db and db.macro and db.macro.paletteShown then
-            TCC.SetMarkerPaletteShown(true)   -- restore the on-screen marker palette
+        if TCC.EnsureMarkerPaletteWatcher then TCC.EnsureMarkerPaletteWatcher() end
+        if TCC.RefreshMarkerPaletteVisibility then
+            TCC.RefreshMarkerPaletteVisibility()   -- restore the palette, honoring its visibility setting
         end
     else
         -- Any state change re-evaluates all rules.

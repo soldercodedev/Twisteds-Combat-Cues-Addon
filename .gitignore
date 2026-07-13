@@ -2,6 +2,9 @@
 *.zip
 .release-staging/
 
+# AI agent guardrails (local/dev only, not shipped or published)
+/guardrails.md
+
 # Dev tooling should never live in this addon repo, but be safe
 __pycache__/
 *.py[cod]

@@ -2,7 +2,7 @@
 ## Title: Twisteds Combat Cues
 ## Notes: Combat-safe audible/visual cues (no target, out of range, aggro, pet down, item ready) plus Focus Tools.
 ## Author: Twistedfury-Zul'jin
-## Version: 1.2.0-beta.2
+## Version: 1.2.0-beta.3
 ## Category: Twisteds Combat Cues
 ## SavedVariables: TwistedsCombatCuesDB
 ## SavedVariablesPerCharacter: TwistedsCombatCuesCharDB
